@@ -8,6 +8,8 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"sync"
+	"time"
 )
 
 type RaftNode int
@@ -15,6 +17,8 @@ type RaftNode int
 type VoteArguments struct {
 	Term        int
 	CandidateID int
+	LastLogIndex int
+	LastLogTerm int
 }
 
 type VoteReply struct {
@@ -25,6 +29,8 @@ type VoteReply struct {
 type AppendEntryArgument struct {
 	Term     int
 	LeaderID int
+	PrevLogIndex int
+	PrevLogTerm int
 }
 
 type AppendEntryReply struct {
@@ -42,12 +48,39 @@ var selfID int
 var serverNodes []ServerConnection
 var currentTerm int
 var votedFor int
+var lastLogTerm int
+var raftLog []int
+var votes int
 
 // The RequestVote RPC as defined in Raft
 // Hint 1: Use the description in Figure 2 of the paper
+	//Reply false if term < currentTerm
+	//If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 // Hint 2: Only focus on the details related to leader election and majority votes
 func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
-
+	if (arguments.Term < currentTerm){ //node is ahead of candidate
+		reply.Term = currentTerm
+		reply.ResultVote = false 
+		return nil
+	}
+	if (currentTerm < arguments.Term){//node is behind
+		currentTerm = arguments.Term //update term
+		votedFor = -1
+	}
+	if (votedFor == -1 || votedFor == arguments.CandidateID){ //second case of figure 2
+		if (arguments.LastLogTerm > lastLogTerm) {	//check up-to-date
+			votedFor = arguments.CandidateID //cast vote
+			reply.ResultVote = true
+		} else if (arguments.LastLogTerm == lastLogTerm && arguments.LastLogIndex >= len(raftLog)-1){
+			votedFor = arguments.CandidateID //cast vote
+			reply.ResultVote = true
+		} else {
+			reply.ResultVote = false
+		}
+	} else {
+		reply.ResultVote = false
+	}
+	reply.Term = currentTerm
 	return nil
 }
 
@@ -62,6 +95,47 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 // You may use this function to help with handling the election time out
 // Hint: It may be helpful to call this method every time the node wants to start an election
 func LeaderElection() {
+	currentTerm +=1 //update term
+	var voteMu sync.Mutex
+	votes = 1 //self-vote automatically
+	voteArgs := VoteArguments{
+		Term: currentTerm, 
+		CandidateID: selfID, 
+		LastLogIndex: len(raftLog)-1, 
+		LastLogTerm: lastLogTerm,
+	}
+	//call RequestVote from all nodes
+	var wg sync.WaitGroup //asynchronous messaging
+	fmt.Printf("\n[%s] Started new election\n", time.Now().Format("15:04:05.000000"))
+	for _, conn := range serverNodes{ //conn = ServerConnection for this ID (in serverConnections map)
+		fmt.Printf("\n[%s] Requesting vote from node %d\n", time.Now().Format("15:04:05.000000"), conn.serverID)
+		wg.Add(1)
+		go func(c ServerConnection){ //async: notify each node in a new goroutine
+			var reply VoteReply
+			defer wg.Done()
+			err := c.rpcConnection.Call("RaftNode.RequestVote", &voteArgs, &reply)
+			if err != nil {
+				log.Println("Error with RequestVote:", err)
+				return
+			}
+			if (reply.Term > currentTerm) { //if candidate is behind, abort
+				currentTerm = reply.Term
+				votedFor = -1
+				return
+			}
+			if reply.ResultVote{
+				voteMu.Lock() //protect vote count access
+				votes +=1
+				voteMu.Unlock()
+			}
+			fmt.Printf("\n[%s] Received reply: %+v", time.Now().Format("15:04:05.000000"), reply)
+		}(conn)
+	}
+	wg.Wait()
+	if (votes > (len(serverNodes)+1)/2){ //majority count
+		fmt.Printf("\nNode %d successfully elected self.", selfID)
+		//TODO: somehow start heartbeats, define leader role
+	}
 }
 
 // You may use this function to help with handling the periodic heartbeats
@@ -165,4 +239,11 @@ func main() {
 	// Heads up: they never will be done!
 	// Hint 4: wg.Wait() might be helpful here
 
+	selfID = myID
+	votedFor = -1
+
+	go LeaderElection() //basic call for testing. will change.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Wait()
 }
