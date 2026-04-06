@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"math/rand"
 )
 
 type RaftNode int
@@ -50,24 +51,25 @@ var currentTerm int
 var votedFor int
 var lastLogTerm int
 var raftLog []int
-var votes int
+var votes int 
+var role string
+var electionTimer *time.Timer
 
 // The RequestVote RPC as defined in Raft
 // Hint 1: Use the description in Figure 2 of the paper
-	//Reply false if term < currentTerm
-	//If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 // Hint 2: Only focus on the details related to leader election and majority votes
 func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
-	if (arguments.Term < currentTerm){ //node is ahead of candidate
-		reply.Term = currentTerm
-		reply.ResultVote = false 
+	if (arguments.Term < currentTerm){ //case 1: candidate term < currentTerm
+		reply.Term = currentTerm 
+		reply.ResultVote = false //reply false
 		return nil
 	}
-	if (currentTerm < arguments.Term){//node is behind
+	if (currentTerm < arguments.Term){//node is behind the candidate
 		currentTerm = arguments.Term //update term
 		votedFor = -1
+		role = "follower"
 	}
-	if (votedFor == -1 || votedFor == arguments.CandidateID){ //second case of figure 2
+	if (votedFor == -1 || votedFor == arguments.CandidateID){ //case 2: votedFor = null or votedFor = candidateID
 		if (arguments.LastLogTerm > lastLogTerm) {	//check up-to-date
 			votedFor = arguments.CandidateID //cast vote
 			reply.ResultVote = true
@@ -88,13 +90,49 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 // Hint 1: Use the description in Figure 2 of the paper
 // Hint 2: Only focus on the details related to leader election and heartbeats
 func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryReply) error {
-
+	//add to raftLog
+	//update lastIndex and prevIndex
+	if (arguments.Term < currentTerm) { //this node is ahead
+		reply.Term = currentTerm
+		reply.Success = false //heartbeat fails
+		return nil
+	}
+	if (currentTerm < arguments.Term) { //this node is behind
+		currentTerm = arguments.Term
+		votedFor = -1
+	}
+	role = "follower"
+	reply.Term = currentTerm
+	reply.Success = true
+	resetElectionTimer()
 	return nil
+}
+
+// Helper to reset the election timer for current node
+func resetElectionTimer(){
+	timerVal := time.Duration(200+rand.Intn(100)) * time.Millisecond //random timer value
+	if electionTimer == nil {
+		electionTimer = time.NewTimer(timerVal) //initialize new timer
+		go func() {
+			for{ //infinite while loop for timer
+				<- electionTimer.C
+				if role != "leader" {
+					fmt.Printf("\n[%s] Node %d timed out, starting election\n", time.Now().Format("15:04:05.000000"), selfID)
+					LeaderElection() //election start when timer runs out
+					resetElectionTimer()
+				}
+			}
+		}()
+	} else { //timer already exists
+		electionTimer.Stop()
+		electionTimer.Reset(timerVal)
+	}
 }
 
 // You may use this function to help with handling the election time out
 // Hint: It may be helpful to call this method every time the node wants to start an election
 func LeaderElection() {
+	role = "candidate"
 	currentTerm +=1 //update term
 	var voteMu sync.Mutex
 	votes = 1 //self-vote automatically
@@ -121,6 +159,7 @@ func LeaderElection() {
 			if (reply.Term > currentTerm) { //if candidate is behind, abort
 				currentTerm = reply.Term
 				votedFor = -1
+				role = "follower"
 				return
 			}
 			if reply.ResultVote{
@@ -134,13 +173,38 @@ func LeaderElection() {
 	wg.Wait()
 	if (votes > (len(serverNodes)+1)/2){ //majority count
 		fmt.Printf("\nNode %d successfully elected self.", selfID)
-		//TODO: somehow start heartbeats, define leader role
+		role = "leader"
+		go Heartbeat()
 	}
 }
 
 // You may use this function to help with handling the periodic heartbeats
 // Hint: Use this only if the node is a leader
 func Heartbeat() {
+	for role == "leader"{
+		//call AppendEntry from all nodes (a.k.a. send heartbeat)
+		for _, conn := range serverNodes {
+			go func(c ServerConnection){  //async: each heartbeat in a new goroutine
+				var reply AppendEntryReply
+				appendArgs := AppendEntryArgument{
+					Term: currentTerm,
+					LeaderID: selfID,
+				}
+				err := c.rpcConnection.Call("RaftNode.AppendEntry", &appendArgs, &reply)
+				if err != nil {
+					log.Println("Heartbeat failed to node ", c.serverID)
+					return
+				}
+				if reply.Success == false { //if a follower is ahead, resign
+					currentTerm = reply.Term
+					votedFor = -1
+					role = "follower"
+					resetElectionTimer()
+				}
+			}(conn)
+		}
+		time.Sleep(50*time.Millisecond)
+	}
 }
 
 func main() {
@@ -241,8 +305,9 @@ func main() {
 
 	selfID = myID
 	votedFor = -1
+	role = "follower"
 
-	go LeaderElection() //basic call for testing. will change.
+	resetElectionTimer() //starts heartbeat process, calls LeaderElection inside
 	var wg sync.WaitGroup
 	wg.Add(1)
 	wg.Wait()
