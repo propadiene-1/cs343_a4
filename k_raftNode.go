@@ -54,7 +54,7 @@ var raftLog []int
 var votes int
 
 // Node state
-var isLeader bool
+var role string
 var mu sync.Mutex
 
 // resetElection is used to signal the election-timer goroutine that a valid
@@ -79,7 +79,7 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 	if currentTerm < arguments.Term { //node is behind
 		currentTerm = arguments.Term //update term
 		votedFor = -1
-		isLeader = false
+		role = "follower"
 	}
 
 	logOK := arguments.LastLogTerm > lastLogTerm || (arguments.LastLogTerm == lastLogTerm && arguments.LastLogIndex >= len(raftLog)-1)
@@ -125,7 +125,7 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 		currentTerm = arguments.Term
 		votedFor = -1
 	}
-	isLeader = false //current node is follower
+	role = "follower" //current node is follower
 
 	reply.Term = currentTerm
 	reply.Success = true
@@ -153,6 +153,7 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 // Hint: It may be helpful to call this method every time the node wants to start an election
 func LeaderElection() {
 	mu.Lock()
+	role = "candidate"
 	currentTerm += 1 //update term
 	term := currentTerm
 	votedFor = selfID
@@ -162,7 +163,7 @@ func LeaderElection() {
 	votes = 1 //self-vote automatically
 
 	voteArgs := VoteArguments{
-		Term:         currentTerm,
+		Term:         term,
 		CandidateID:  selfID,
 		LastLogIndex: len(raftLog) - 1,
 		LastLogTerm:  lastLogTerm,
@@ -186,7 +187,7 @@ func LeaderElection() {
 			if reply.Term > currentTerm { //if candidate is behind, abort
 				currentTerm = reply.Term
 				votedFor = -1
-				isLeader = false
+				role = "follower"
 				mu.Unlock()
 				return
 			}
@@ -203,9 +204,9 @@ func LeaderElection() {
 	wg.Wait()
 	mu.Lock()
 	majority := (len(serverNodes)+1)/2 + 1
-	wonElection := votes >= majority && currentTerm == term && !isLeader
+	wonElection := votes >= majority && currentTerm == term && role != "leader"
 	if wonElection {
-		isLeader = true
+		role = "leader"
 	}
 	mu.Unlock()
 	if wonElection {
@@ -228,11 +229,11 @@ func LeaderElection() {
 func Heartbeat() {
 	for {
 		mu.Lock()
-		if !isLeader {
+		if role != "leader" {
 			mu.Unlock()
 			return
 		}
-		term := currentTerm
+		term := currentTerm //capture current term
 		mu.Unlock()
 		args := AppendEntryArgument{
 			Term:         term,
@@ -256,7 +257,7 @@ func Heartbeat() {
 				if reply.Term > currentTerm {
 					currentTerm = reply.Term
 					votedFor = -1
-					isLeader = false
+					role = "follower"
 					fmt.Printf("\n[%s] Node %d stepping down (saw term %d)\n",
 						time.Now().Format("15:04:05.000000"), selfID, reply.Term)
 				}
@@ -365,7 +366,7 @@ func main() {
 
 	selfID = myID
 	votedFor = -1
-	isLeader = false
+	role = "follower"
 
 	// Election timeout loop.
 	// Each iteration waits for a randomised timeout in [150, 300) ms.
@@ -384,9 +385,9 @@ func main() {
 				// Timer expired — check whether we are already the leader before
 				// starting an election
 				mu.Lock()
-				leader := isLeader
+				r := role
 				mu.Unlock()
-				if !leader {
+				if r == "follower" {
 					go LeaderElection()
 				}
 			}
