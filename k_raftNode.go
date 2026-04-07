@@ -387,7 +387,7 @@ func main() {
 				mu.Lock()
 				r := role
 				mu.Unlock()
-				if r == "follower" {
+				if r == "follower" || r == "candidate" {
 					go LeaderElection()
 				}
 			}
