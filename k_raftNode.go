@@ -32,6 +32,8 @@ type AppendEntryArgument struct {
 	LeaderID     int
 	PrevLogIndex int
 	PrevLogTerm  int
+	Entries []LogEntry //empty if heartbeat message
+	LeaderCommit int //commit index
 }
 
 type AppendEntryReply struct {
@@ -45,17 +47,33 @@ type ServerConnection struct {
 	rpcConnection *rpc.Client
 }
 
+type LogEntry struct {
+ Index int
+ Term int
+}
+
+//Leader election variabled
 var selfID int
 var serverNodes []ServerConnection
 var currentTerm int
 var votedFor int
 var lastLogTerm int
-var raftLog []int
+var raftLog []LogEntry 
 var votes int
+
+//Log replication state variables
+var commitIndex int //index of last known log entry committed
+var lastApplied int //index of highest log entry applied
+var lastAppliedIndex int
+
+//Leader only
+var nextIndex []int
+var matchIndex []int
 
 // Node state
 var role string
 var mu sync.Mutex
+var isLeader bool
 
 // resetElection is used to signal the election-timer goroutine that a valid
 // heartbeat (or granted vote) was received, so the timer should restart.
@@ -80,9 +98,16 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 		currentTerm = arguments.Term //update term
 		votedFor = -1
 		role = "follower"
+		isLeader = false
+	}
+	//candidate log is up to date if last term is higher, or same term as leader with log length >= raft log
+	nodelasIndex := len(raftLog) -1
+	nodeLastTerm := 0
+	if nodeLastIndex >= 0 {
+		nodeLastTerm = raftLog[nodeLastIndex].Term
 	}
 
-	logOK := arguments.LastLogTerm > lastLogTerm || (arguments.LastLogTerm == lastLogTerm && arguments.LastLogIndex >= len(raftLog)-1)
+	logOK := arguments.LastLogTerm > nodeLastTerm || (arguments.LastLogTerm == nodeLastTerm && arguments.LastLogIndex >= nodeLastIndex)
 
 	if (votedFor == -1 || votedFor == arguments.CandidateID) && logOK { //second case of figure 2
 		votedFor = arguments.CandidateID
@@ -126,8 +151,57 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 		votedFor = -1
 	}
 	role = "follower" //current node is follower
+	isLeader = false
 
 	reply.Term = currentTerm
+
+	//check if log contains an entry at PrevLogIndex
+	if arguments.PrevLogIndex >=0 {
+		if arguments.PrevLogIndex >= len(raftLog) {
+			reply.Success = false //don't have index yet
+			
+			select{
+			case resetElection <- struct {} {}:
+			default:
+			}
+			return nil
+		}
+		if raftLog[arguments.PrevLogIndex].Term != arguments.PrevLogTerm {
+			//conflicting entry (incorrect info - must delete everything after and get correct entries)
+			raftLog = raftLog[:arguments.PrevLogIndex]
+			reply.Success = false
+			select{
+			case resetElection <- struct {} {}:
+			default:
+			}
+			return nil
+		}
+	}
+
+	//append new entries not already in the log
+	insertAt := arguments.PrevLogIndex + 1
+	for i, entry := range arguments.Entries {
+		logPos := insertAt + i
+		if logPos < len(raftLog) {
+			if raftLog[logPos].Term != entry.Term {
+				//conflicting entry 
+				raftLog = raftLog[:logPos]
+				raftLog = append(raftLog, entry)
+			}
+		} else {
+			raftLog = append(raftLog, entry)
+		}
+	}
+
+	//update commitIndex if leader's is ahead
+	if arguments.LeaderCommit > commitIndex {
+		lastNewIndex := len(raftLog) - 1
+		if arguments.LeaderCommit < lastNewIndex {
+			commitIndex = arguments.LeaderCommit
+		}else {
+			commitIndex = lastNewIndex
+		}
+	}
 	reply.Success = true
 
 	//reset election timer
@@ -135,8 +209,16 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 	case resetElection <- struct{}{}:
 	default:
 	}
+
+	if len(arguments.Entries) > 0{
+		fmt.Printf("\n[%s] Appended %d entries from leader %d (term %d), log now length %d\n",
+			time.Now().Format("15:04:05.000000"), len(arguments.Entries),
+			arguments.LeaderID, arguments.Term, len(raftLog))
+	}else{ //log entry empty - send heartbeat msg
 	fmt.Printf("\n[%s] Heartbeat received from leader %d (term %d)\n",
 		time.Now().Format("15:04:05.000000"), arguments.LeaderID, arguments.Term)
+	}
+
 	return nil
 }
 
@@ -157,21 +239,32 @@ func LeaderElection() {
 	currentTerm += 1 //update term
 	term := currentTerm
 	votedFor = selfID
+
+	myLastIndex := len(raftLog) -1
+	myLastTerm := 0
+	if myLastIndex >= 0{
+		myLastTerm = raftLog[myLastIndex].Term
+	}
 	mu.Unlock()
 
 	var voteMu sync.Mutex
-	votes = 1 //self-vote automatically
+	localVotes := 1 //self-vote automatically
 
 	voteArgs := VoteArguments{
 		Term:         term,
 		CandidateID:  selfID,
-		LastLogIndex: len(raftLog) - 1,
-		LastLogTerm:  lastLogTerm,
+		LastLogIndex: myLastIndex,
+		LastLogTerm:  myLastTerm,
 	}
+
+	//Start election msg w/ term
+	fmt.Printf("\n[%s] Node %d starting election for term %d\n",
+		time.Now().Format("15:04:05.000000"), selfID, term)
+ 
 
 	//call RequestVote from all nodes
 	var wg sync.WaitGroup //asynchronous messaging
-	fmt.Printf("\n[%s] Started new election\n", time.Now().Format("15:04:05.000000"))
+	//fmt.Printf("\n[%s] Started new election\n", time.Now().Format("15:04:05.000000"))
 	for _, conn := range serverNodes { //conn = ServerConnection for this ID (in serverConnections map)
 		fmt.Printf("\n[%s] Requesting vote from node %d\n", time.Now().Format("15:04:05.000000"), conn.serverID)
 		wg.Add(1)
@@ -188,6 +281,7 @@ func LeaderElection() {
 				currentTerm = reply.Term
 				votedFor = -1
 				role = "follower"
+				isLeader = false
 				mu.Unlock()
 				return
 			}
@@ -195,32 +289,40 @@ func LeaderElection() {
 
 			if reply.ResultVote {
 				voteMu.Lock() //protect vote count access
-				votes += 1
+				localVotes += 1
 				voteMu.Unlock()
 			}
-			fmt.Printf("\n[%s] Received reply: %+v", time.Now().Format("15:04:05.000000"), reply)
+			fmt.Printf("\n[%s] Vote reply from node %d: %+v", time.Now().Format("15:04:05.000000"), c.serverID, reply)
 		}(conn)
 	}
 	wg.Wait()
+
 	mu.Lock()
 	majority := (len(serverNodes)+1)/2 + 1
 	wonElection := votes >= majority && currentTerm == term && role != "leader"
 	if wonElection {
 		role = "leader"
+		isLeader=true
+
+		nextIndex = make([]int,len(serverNodes))
+		matchIndex = make([]int, len(serverNodes))
+		for i:= range serverNodes{
+			nextIndex[i] = len(raftLog)
+			matchIndex[i] = -1
+		}
 	}
 	mu.Unlock()
+
 	if wonElection {
 		fmt.Printf("\n[%s] Node %d elected leader for term %d (votes: %d/%d)\n",
-			time.Now().Format("15:04:05.000000"), selfID, term, votes, len(serverNodes)+1)
+			time.Now().Format("15:04:05.000000"), selfID, term, localVotes, len(serverNodes)+1)
 		go Heartbeat()
 	} else {
 		fmt.Printf("\n[%s] Node %d lost election for term %d (votes: %d/%d)\n",
-			time.Now().Format("15:04:05.000000"), selfID, term, votes, len(serverNodes)+1)
+			time.Now().Format("15:04:05.000000"), selfID, term, localVotes, len(serverNodes)+1)
 	}
 }
 
-// if (votes > (len(serverNodes)+1)/2){ //majority count
-// 	fmt.Printf("\nNode %d successfully elected self.", selfID)
 // 	//TODO: somehow start heartbeats, define leader role
 // }
 
@@ -234,38 +336,118 @@ func Heartbeat() {
 			return
 		}
 		term := currentTerm //capture current term
+		leaderCommit := commitIndex
+		logSnapshot := make([]LogEntry, len(raftLog))
+		copy(logSnapshot, raftLog)
+		nexti := make([]int, len(nextIndex))
+		copy(nexti, nextIndex)
 		mu.Unlock()
-		args := AppendEntryArgument{
-			Term:         term,
-			LeaderID:     selfID,
-			PrevLogIndex: len(raftLog) - 1,
-			PrevLogTerm:  lastLogTerm,
-		}
 
-		for _, conn := range serverNodes {
-			go func(c ServerConnection) {
-				var reply AppendEntryReply
-				err := c.rpcConnection.Call("RaftNode.AppendEntry", &args, &reply)
-
-				if err != nil {
-					log.Printf("Heartbeat to node %d failed: %v\n", c.serverID, err)
+		for i, conn:= range serverNodes{
+			go func(c ServerConnection, i int){
+				mu.Lock()
+				if role != "leader" {
+					mu.Unlock()
 					return
 				}
+				prevIndex := nexti[i] - 1
+				prevTerm := 0
+				if prevIndex >= 0 && prevIndex < len(logSnapshot){
+					prevTerm = logSnapshot[prevIndex].Term
+			}
+			var entries []LogEntry
+			if nexti[i] < len(logSnapshot){
+				entries = logSnapshot[nexti[i]:]
+			}
+			mu.Unlock()
 
-				mu.Lock()
-				defer mu.Unlock()
-				if reply.Term > currentTerm {
-					currentTerm = reply.Term
-					votedFor = -1
-					role = "follower"
-					fmt.Printf("\n[%s] Node %d stepping down (saw term %d)\n",
-						time.Now().Format("15:04:05.000000"), selfID, reply.Term)
+			args := AppendEntryArgument{
+				Term:         term,
+				LeaderID:     selfID,
+				PrevLogIndex: prevIndex,
+				PrevLogTerm:  prevTerm,
+				LogEntries: entries,
+				LeaderCommit: leaderCommit,
+		}
+		
+		var reply AppendEntryReply
+		err:= c.rpcConnection.Call("RaftNode.AppendEntry", &args, &reply)
+
+		if err!=nil{
+			log.Printf("AppendEntry to node %d failed: %v\n", c.serverID, err)
+					return
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if reply.Term > currentTerm{
+			currentTerm = reply.Term
+			votedFor = -1
+			role = "follower"
+			fmt.Printf("\n[%s] Node %d stepping down (saw term %d)\n", time.Now().Format("15:04:05.000000"), selfID, reply.Term)
+			return
 				}
-			}(conn)
+		if reply.Success {
+			newMatch := args.PrevLogIndex + len(args.Entries)
+			if newMatch > matchIndex[i]{
+				matchIndex[i] = newMatch
+			}
+			for n:= len(raftLog) - 1; n>commitIndex; n--{
+				if raftLog[n].Term!= currentTerm{
+					continue
+				}
+				count := 1
+				for _,mi:= range matchIndex{
+					if mi>=n{
+						count++
+					}
+				}
+				if count >= (len(serverNodes)+1)/2+1{
+					commitIndex=n
+					fmt.Printf("\n[%s] Leader committed log up to index %d\n",
+								time.Now().Format("15:04:05.000000"), commitIndex)
+							break
+				}
+			}
+		}else{
+			if nextIndex[i] >0{
+				nextIndex[i]--
+			}
+		}
+	}(conn,i)
 		}
 		//Heartbeat interval: 100 ms
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// This function is designed to emulate a client reaching out to the
+server. Note that many of the realistic details are removed, for
+simplicity
+func ClientAddToLog() {
+ // In a realistic scenario, the client will find the leader node and
+communicate with it
+ // In this implementation, we are pretending that the client reached
+out to the server somehow
+ // But any new log entries will not be created unless the server /
+node is a leader
+ // isLeader here is a boolean to indicate whether the node is a leader
+or not
+ if isLeader {
+ // lastAppliedIndex here is an int variable that is needed by a node
+to store the value of the last index it used in the log
+ entry := LogEntry{lastAppliedIndex, currentTerm}
+ log.Println("Client communication created the new log entry at
+index " + strconv.Itoa(entry.Index))
+ // Add rest of logic here
+ // HINT 1: using the AppendEntry RPC might happen here
+ }
+ // HINT 2: force the thread to sleep for a good amount of time (less
+than that of the leader election timer) and then repeat the actions above.
+You may use an endless loop here or recursively call the function
+ // HINT 3: you don’t need to add to the logic of creating new log
+entries, just handle the replication
 }
 
 func main() {
