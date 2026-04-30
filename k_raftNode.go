@@ -88,7 +88,10 @@ var resetElection = make(chan struct{}, 1)
 // If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 // Hint 2: Only focus on the details related to leader election and majority votes
 func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
-	if isAlive == false{
+	mu.Lock()
+	alive := isAlive
+	mu.Unlock()
+	if !alive{
 		return nil
 	}
 	mu.Lock()
@@ -143,7 +146,10 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 // Hint 1: Use the description in Figure 2 of the paper
 // Hint 2: Only focus on the details related to leader election and heartbeats
 func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryReply) error {
-	if isAlive == false{
+	mu.Lock()
+	alive := isAlive
+	mu.Unlock()
+	if !alive{
 		return nil
 	}
 	mu.Lock()
@@ -241,7 +247,9 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 
 //failure simulation
 func failNode(t int) {
+	mu.Lock()
 	isAlive = false
+	mu.Unlock()
 	timer := time.NewTimer(time.Duration(t) * time.Second)
 	go func () {
 		<- timer.C
@@ -252,7 +260,10 @@ func failNode(t int) {
 // You may use this function to help with handling the election time out
 // Hint: It may be helpful to call this method every time the node wants to start an election
 func LeaderElection() {
-	if isAlive == false{
+	mu.Lock()
+	alive := isAlive
+	mu.Unlock()
+	if !alive{
 		return
 	}
 	mu.Lock()
@@ -351,7 +362,10 @@ func LeaderElection() {
 // Hint: Use this only if the node is a leader
 func Heartbeat() {
 	for {
-		if isAlive == false {
+		mu.Lock()
+		alive := isAlive
+		mu.Unlock()
+		if !alive {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -459,7 +473,10 @@ func ClientAddToLog() {
  // But any new log entries will not be created unless the server / node is a leader
  // isLeader here is a boolean to indicate whether the node is a leader or not
 	for {
-		if isAlive == false{
+		mu.Lock()
+		alive := isAlive
+		mu.Unlock()
+		if !alive{
 			continue
 		}
 		time.Sleep(1 * time.Second)
