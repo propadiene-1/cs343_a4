@@ -224,8 +224,7 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 			time.Now().Format("15:04:05.000000"), len(arguments.Entries),
 			arguments.LeaderID, arguments.Term, len(raftLog))
 	}else{ //log entry empty - send heartbeat msg
-	fmt.Printf("\n[%s] Heartbeat received from leader %d (term %d)\n",
-		time.Now().Format("15:04:05.000000"), arguments.LeaderID, arguments.Term)
+	//fmt.Printf("\n[%s] Heartbeat received from leader %d (term %d)\n", time.Now().Format("15:04:05.000000"), arguments.LeaderID, arguments.Term)
 	}
 
 	return nil
@@ -392,12 +391,13 @@ func Heartbeat() {
 				LeaderCommit: leaderCommit,
 		}
 		
+		fmt.Printf("\n[Leader %d] Sending %d entries to node %d (prevIndex=%d prevTerm=%d)\n", selfID, len(entries), c.serverID, prevIndex, prevTerm)
 		var reply AppendEntryReply
 		err:= c.rpcConnection.Call("RaftNode.AppendEntry", &args, &reply)
 
 		if err!=nil{
-			log.Printf("AppendEntry to node %d failed: %v\n", c.serverID, err)
-					return
+			fmt.Printf("\nAppendEntry to node %d failed: %v\n", c.serverID, err)
+			return
 		}
 
 		mu.Lock()
@@ -411,25 +411,29 @@ func Heartbeat() {
 			return
 				}
 		if reply.Success {
-			newMatch := args.PrevLogIndex + len(args.Entries)
-			if newMatch > matchIndex[i]{
-				matchIndex[i] = newMatch
-			}
-			for n:= len(raftLog) - 1; n>commitIndex; n--{
-				if raftLog[n].Term!= currentTerm{
-					continue
+			if len(args.Entries) > 0 {
+				newMatch := args.PrevLogIndex + len(args.Entries)
+				if newMatch > matchIndex[i]{
+					matchIndex[i] = newMatch
+					nextIndex[i] = newMatch+1
 				}
-				count := 1
-				for _,mi:= range matchIndex{
-					if mi>=n{
-						count++
+				for n:= len(raftLog) - 1; n>commitIndex; n--{
+					if raftLog[n].Term!= currentTerm{
+						continue
 					}
-				}
-				if count >= (len(serverNodes)+1)/2+1{
-					commitIndex=n
-					fmt.Printf("\n[%s] Leader committed log up to index %d\n",
-								time.Now().Format("15:04:05.000000"), commitIndex)
-							break
+					count := 1
+					for _,mi:= range matchIndex{
+						if mi>=n{
+							count++
+						}
+					}
+					if count >= (len(serverNodes)+1)/2+1{
+						commitIndex=n
+						fmt.Printf("\n[%s] Leader committed log up to index %d\n",
+									time.Now().Format("15:04:05.000000"), commitIndex)
+						fmt.Printf("\n[Leader %d] matchIndex=%v nextIndex=%v\n", selfID, matchIndex, nextIndex)
+						break
+					}
 				}
 			}
 		}else{
@@ -450,14 +454,22 @@ func ClientAddToLog() {
  // In this implementation, we are pretending that the client reached out to the server somehow
  // But any new log entries will not be created unless the server / node is a leader
  // isLeader here is a boolean to indicate whether the node is a leader or not
- if isLeader {
- // lastAppliedIndex here is an int variable that is needed by a node to store the value of the last index it used in the log
- entry := LogEntry{lastAppliedIndex, currentTerm}
- log.Println("Client communication created the new log entry at index " + strconv.Itoa(entry.Index))
- // Add rest of logic here
+	for {
+		time.Sleep(1 * time.Second)
+		//fmt.Printf("\n[Node %d] ClientAddToLog ticked. isLeader=%v\n", selfID, isLeader)
+		if isLeader {
+			// lastAppliedIndex here is an int variable that is needed by a node to store the value of the last index it used in the log
+			mu.Lock()
+			entry := LogEntry{lastAppliedIndex, currentTerm}
+			log.Println("Client communication created the new log entry at index " + strconv.Itoa(entry.Index))
+			raftLog = append(raftLog, entry)
+			lastAppliedIndex++
+			//fmt.Printf("\n[Node %d] Log is now length %d\n", selfID, len(raftLog))
+			mu.Unlock()
+		}
+	}
  // HINT 1: using the AppendEntry RPC might happen here
- }
- // HINT 2: force the thread to sleep for a good amount of time (less than that of the leader election timer) and then repeat the actions above 
+ // HINT 2: force the thread to sleep for a good amount of time (less than that of the leader election timer) and then repeat the actions above.
  // You may use an endless loop here or recursively call the function
  // HINT 3: you don’t need to add to the logic of creating new log entries, just handle the replication
 }
@@ -562,6 +574,9 @@ func main() {
 	votedFor = -1
 	role = "follower"
 	isAlive = true
+	commitIndex = -1
+
+	go ClientAddToLog()
 
 	// Election timeout loop.
 	// Each iteration waits for a randomised timeout in [150, 300) ms.
