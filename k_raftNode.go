@@ -57,14 +57,11 @@ var selfID int
 var serverNodes []ServerConnection
 var currentTerm int
 var votedFor int
-var lastLogTerm int
 var raftLog []LogEntry 
-var votes int
 
 //Log replication state variables
 var commitIndex int //index of last known log entry committed
-var lastApplied int //index of highest log entry applied
-var lastAppliedIndex int
+var lastAppliedIndex int //index of highest log entry applied
 
 //Leader only
 var nextIndex []int
@@ -253,7 +250,9 @@ func failNode(t int) {
 	timer := time.NewTimer(time.Duration(t) * time.Second)
 	go func () {
 		<- timer.C
+		mu.Lock()
 		isAlive = true
+		mu.Unlock()
 	}()
 }
 
