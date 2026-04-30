@@ -351,6 +351,10 @@ func LeaderElection() {
 // Hint: Use this only if the node is a leader
 func Heartbeat() {
 	for {
+		if isAlive == false {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		mu.Lock()
 		if role != "leader" {
 			mu.Unlock()
@@ -391,7 +395,7 @@ func Heartbeat() {
 				LeaderCommit: leaderCommit,
 		}
 		
-		fmt.Printf("\n[Leader %d] Sending %d entries to node %d (prevIndex=%d prevTerm=%d)\n", selfID, len(entries), c.serverID, prevIndex, prevTerm)
+		//fmt.Printf("\n[Leader %d] Sending %d entries to node %d (prevIndex=%d prevTerm=%d)\n", selfID, len(entries), c.serverID, prevIndex, prevTerm)
 		var reply AppendEntryReply
 		err:= c.rpcConnection.Call("RaftNode.AppendEntry", &args, &reply)
 
@@ -431,7 +435,7 @@ func Heartbeat() {
 						commitIndex=n
 						fmt.Printf("\n[%s] Leader committed log up to index %d\n",
 									time.Now().Format("15:04:05.000000"), commitIndex)
-						fmt.Printf("\n[Leader %d] matchIndex=%v nextIndex=%v\n", selfID, matchIndex, nextIndex)
+						//fmt.Printf("\n[Leader %d] matchIndex=%v nextIndex=%v\n", selfID, matchIndex, nextIndex)
 						break
 					}
 				}
@@ -455,6 +459,9 @@ func ClientAddToLog() {
  // But any new log entries will not be created unless the server / node is a leader
  // isLeader here is a boolean to indicate whether the node is a leader or not
 	for {
+		if isAlive == false{
+			continue
+		}
 		time.Sleep(1 * time.Second)
 		//fmt.Printf("\n[Node %d] ClientAddToLog ticked. isLeader=%v\n", selfID, isLeader)
 		if isLeader {
@@ -577,6 +584,16 @@ func main() {
 	commitIndex = -1
 
 	go ClientAddToLog()
+
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			if scanner.Text() == "fail"{
+				fmt.Printf("\n[Node %d] Simulating failure for 5 seconds\n", selfID)
+				failNode(5)
+			}
+		}
+	}()
 
 	// Election timeout loop.
 	// Each iteration waits for a randomised timeout in [150, 300) ms.
