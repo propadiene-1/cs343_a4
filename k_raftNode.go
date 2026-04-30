@@ -473,13 +473,13 @@ func ClientAddToLog() {
  // But any new log entries will not be created unless the server / node is a leader
  // isLeader here is a boolean to indicate whether the node is a leader or not
 	for {
+		time.Sleep(1 * time.Second)
 		mu.Lock()
 		alive := isAlive
 		mu.Unlock()
 		if !alive{
 			continue
 		}
-		time.Sleep(1 * time.Second)
 		//fmt.Printf("\n[Node %d] ClientAddToLog ticked. isLeader=%v\n", selfID, isLeader)
 		if isLeader {
 			// lastAppliedIndex here is an int variable that is needed by a node to store the value of the last index it used in the log
