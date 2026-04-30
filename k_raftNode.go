@@ -107,7 +107,7 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 		isLeader = false
 	}
 	//candidate log is up to date if last term is higher, or same term as leader with log length >= raft log
-	nodelasIndex := len(raftLog) -1
+	nodeLastIndex := len(raftLog) -1
 	nodeLastTerm := 0
 	if nodeLastIndex >= 0 {
 		nodeLastTerm = raftLog[nodeLastIndex].Term
@@ -243,7 +243,7 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 //failure simulation
 func failNode(t int) {
 	isAlive = false
-	time := time.NewTimer(time.Duration(t) * time.Second)
+	timer := time.NewTimer(time.Duration(t) * time.Second)
 	go func () {
 		<- timer.C
 		isAlive = true
@@ -321,7 +321,7 @@ func LeaderElection() {
 
 	mu.Lock()
 	majority := (len(serverNodes)+1)/2 + 1
-	wonElection := votes >= majority && currentTerm == term && role != "leader"
+	wonElection := localVotes >= majority && currentTerm == term && role != "leader"
 	if wonElection {
 		role = "leader"
 		isLeader=true
@@ -388,7 +388,7 @@ func Heartbeat() {
 				LeaderID:     selfID,
 				PrevLogIndex: prevIndex,
 				PrevLogTerm:  prevTerm,
-				LogEntries: entries,
+				Entries: entries,
 				LeaderCommit: leaderCommit,
 		}
 		
@@ -444,32 +444,22 @@ func Heartbeat() {
 	}
 }
 
-// This function is designed to emulate a client reaching out to the
-server. Note that many of the realistic details are removed, for
-simplicity
+// This function is designed to emulate a client reaching out to the server. Note that many of the realistic details are removed, for simplicity
 func ClientAddToLog() {
- // In a realistic scenario, the client will find the leader node and
-communicate with it
- // In this implementation, we are pretending that the client reached
-out to the server somehow
- // But any new log entries will not be created unless the server /
-node is a leader
- // isLeader here is a boolean to indicate whether the node is a leader
-or not
+ // In a realistic scenario, the client will find the leader node and communicate with it
+ // In this implementation, we are pretending that the client reached out to the server somehow
+ // But any new log entries will not be created unless the server / node is a leader
+ // isLeader here is a boolean to indicate whether the node is a leader or not
  if isLeader {
- // lastAppliedIndex here is an int variable that is needed by a node
-to store the value of the last index it used in the log
+ // lastAppliedIndex here is an int variable that is needed by a node to store the value of the last index it used in the log
  entry := LogEntry{lastAppliedIndex, currentTerm}
- log.Println("Client communication created the new log entry at
-index " + strconv.Itoa(entry.Index))
+ log.Println("Client communication created the new log entry at index " + strconv.Itoa(entry.Index))
  // Add rest of logic here
  // HINT 1: using the AppendEntry RPC might happen here
  }
- // HINT 2: force the thread to sleep for a good amount of time (less
-than that of the leader election timer) and then repeat the actions above.
-You may use an endless loop here or recursively call the function
- // HINT 3: you don’t need to add to the logic of creating new log
-entries, just handle the replication
+ // HINT 2: force the thread to sleep for a good amount of time (less than that of the leader election timer) and then repeat the actions above 
+ // You may use an endless loop here or recursively call the function
+ // HINT 3: you don’t need to add to the logic of creating new log entries, just handle the replication
 }
 
 func main() {
@@ -571,6 +561,7 @@ func main() {
 	selfID = myID
 	votedFor = -1
 	role = "follower"
+	isAlive = true
 
 	// Election timeout loop.
 	// Each iteration waits for a randomised timeout in [150, 300) ms.
