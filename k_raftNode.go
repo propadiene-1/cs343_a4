@@ -75,6 +75,9 @@ var role string
 var mu sync.Mutex
 var isLeader bool
 
+//failure simulation
+var isAlive bool
+
 // resetElection is used to signal the election-timer goroutine that a valid
 // heartbeat (or granted vote) was received, so the timer should restart.
 var resetElection = make(chan struct{}, 1)
@@ -85,6 +88,9 @@ var resetElection = make(chan struct{}, 1)
 // If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 // Hint 2: Only focus on the details related to leader election and majority votes
 func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
+	if isAlive == false{
+		return nil
+	}
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -137,6 +143,9 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 // Hint 1: Use the description in Figure 2 of the paper
 // Hint 2: Only focus on the details related to leader election and heartbeats
 func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryReply) error {
+	if isAlive == false{
+		return nil
+	}
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -231,9 +240,22 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 // 	return nil
 // }
 
+//failure simulation
+func failNode(t int) {
+	isAlive = false
+	time := time.NewTimer(time.Duration(t) * time.Second)
+	go func () {
+		<- timer.C
+		isAlive = true
+	}()
+}
+
 // You may use this function to help with handling the election time out
 // Hint: It may be helpful to call this method every time the node wants to start an election
 func LeaderElection() {
+	if isAlive == false{
+		return
+	}
 	mu.Lock()
 	role = "candidate"
 	currentTerm += 1 //update term
