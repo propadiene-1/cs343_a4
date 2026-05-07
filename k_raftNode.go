@@ -50,6 +50,21 @@ type ServerConnection struct {
 type LogEntry struct {
  Index int
  Term int
+ Key string
+ Value string
+ Operation string 
+}
+
+type ClientArguments struct {
+	VariableName string
+	CommandType string
+	Data *string
+}
+
+type ClientReply struct {
+	DataValue struct
+	WrongLeader bool 
+	LeaderAddress string
 }
 
 //Leader election variabled
@@ -75,9 +90,29 @@ var isLeader bool
 //failure simulation
 var isAlive bool
 
+var kvStore = make(map[string]string) //hash map that stores key-values
+var myaddress string
+var leaderAddress string
+
 // resetElection is used to signal the election-timer goroutine that a valid
 // heartbeat (or granted vote) was received, so the timer should restart.
 var resetElection = make(chan struct{}, 1)
+
+func applyCommitted(){
+	for lastApplied < commitIndex{
+		lastApplied++
+		if lastApplied >= len(raftLog){
+			break
+		}
+		entry := raftLog[lastApplied]
+		if entry.Operation == "W"{
+			kvStore[entry.Key] = entry.Value
+			fmt.Printf("\n[%s] Node %d write operation: %q = %q\n",
+				time.Now().Format("15:04:05.000000"), selfID, entry.Key, entry.Value)
+
+		}
+	}
+}
 
 // The RequestVote RPC as defined in Raft
 // Hint 1: Use the description in Figure 2 of the paper
@@ -165,6 +200,13 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 	role = "follower" //current node is follower
 	isLeader = false
 
+	for _, node := range serverNodes{
+		if node.serverID == arguments.LeaderID{
+			leaderAddress=node.Address
+			break
+		}
+	}
+
 	reply.Term = currentTerm
 
 	//check if log contains an entry at PrevLogIndex
@@ -213,6 +255,7 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 		}else {
 			commitIndex = lastNewIndex
 		}
+		applyCommitted()
 	}
 	reply.Success = true
 
@@ -242,6 +285,49 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 // 	return nil
 // }
 
+func (*RaftNode) ClientAddToLog (args ClientArguments, reply *ClientReply) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !isLeader {
+		reply.WrongLeader = true
+		reply.LeaderAddress = leaderAddress
+		return nil
+	}
+
+	reply.WrongLeader = false
+
+	if args.CommandType = "R"{
+		val,ok := kvStore[args.VariableName]
+		if ok{
+			reply.DataValue =val
+		}else{
+			reply.DataValue = ""
+		}
+		fmt.Printf("\n[%s] Client read operation: %q = %q\n",
+			time.Now().Format("15:04:05.000000"), args.VariableName, reply.DataValue)
+		return nil
+	}
+
+	val := ""
+	if args.Data != nil{
+		val = *args.Data
+	}
+	entry := LogEntry{
+		Index: lastAppliedIndex,
+		Term: currentTerm,
+		Key: args.VariableName,
+		Value: val,
+		Operation: "W",
+	}
+	raftLog = append(raftLog, entry)
+	lastAppliedIndex++
+
+	fmt.Printf("\n[%s] Client next write operation: idx=%d key=%q val=%q\n",
+		time.Now().Format("15:04:05.000000"), entry.Index, entry.Key, entry.Value)
+	return nil
+
+}
 //failure simulation
 func failNode(t int) {
 	mu.Lock()
@@ -334,6 +420,7 @@ func LeaderElection() {
 	if wonElection {
 		role = "leader"
 		isLeader=true
+		leaderAddress = myaddress
 
 		nextIndex = make([]int,len(serverNodes))
 		matchIndex = make([]int, len(serverNodes))
@@ -448,7 +535,7 @@ func Heartbeat() {
 						commitIndex=n
 						fmt.Printf("\n[%s] Leader committed log up to index %d\n",
 									time.Now().Format("15:04:05.000000"), commitIndex)
-						//fmt.Printf("\n[Leader %d] matchIndex=%v nextIndex=%v\n", selfID, matchIndex, nextIndex)
+						applyCommitted()
 						break
 					}
 				}
@@ -529,6 +616,7 @@ func main() {
 		log.Printf(text, index)
 		if index == myID {
 			myPort = text
+			myAddress = text
 			index++
 			continue
 		}
@@ -576,6 +664,10 @@ func main() {
 			log.Println("Trying again. Connection error: ", err)
 			// Try again!
 			client, err = rpc.DialHTTP("tcp", element)
+		}
+		serverID := index
+		if index >= myID{
+			serverID = index++
 		}
 		// Once connection is finally established
 		// Save that connection information in the servers list
