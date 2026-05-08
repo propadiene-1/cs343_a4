@@ -62,7 +62,7 @@ type ClientArguments struct {
 }
 
 type ClientReply struct {
-	DataValue struct
+	DataValue string
 	WrongLeader bool 
 	LeaderAddress string
 }
@@ -91,7 +91,7 @@ var isLeader bool
 var isAlive bool
 
 var kvStore = make(map[string]string) //hash map that stores key-values
-var myaddress string
+var myAddress string
 var leaderAddress string
 
 // resetElection is used to signal the election-timer goroutine that a valid
@@ -99,12 +99,12 @@ var leaderAddress string
 var resetElection = make(chan struct{}, 1)
 
 func applyCommitted(){
-	for lastApplied < commitIndex{
-		lastApplied++
-		if lastApplied >= len(raftLog){
+	for lastAppliedIndex < commitIndex{
+		lastAppliedIndex++
+		if lastAppliedIndex >= len(raftLog){
 			break
 		}
-		entry := raftLog[lastApplied]
+		entry := raftLog[lastAppliedIndex]
 		if entry.Operation == "W"{
 			kvStore[entry.Key] = entry.Value
 			fmt.Printf("\n[%s] Node %d write operation: %q = %q\n",
@@ -297,7 +297,7 @@ func (*RaftNode) ClientAddToLog (args ClientArguments, reply *ClientReply) error
 
 	reply.WrongLeader = false
 
-	if args.CommandType = "R"{
+	if args.CommandType == "R"{
 		val,ok := kvStore[args.VariableName]
 		if ok{
 			reply.DataValue =val
@@ -314,14 +314,14 @@ func (*RaftNode) ClientAddToLog (args ClientArguments, reply *ClientReply) error
 		val = *args.Data
 	}
 	entry := LogEntry{
-		Index: lastAppliedIndex,
+		Index: len(raftLog),
 		Term: currentTerm,
 		Key: args.VariableName,
 		Value: val,
 		Operation: "W",
 	}
 	raftLog = append(raftLog, entry)
-	lastAppliedIndex++
+	//lastAppliedIndex++
 
 	fmt.Printf("\n[%s] Client next write operation: idx=%d key=%q val=%q\n",
 		time.Now().Format("15:04:05.000000"), entry.Index, entry.Key, entry.Value)
@@ -420,7 +420,7 @@ func LeaderElection() {
 	if wonElection {
 		role = "leader"
 		isLeader=true
-		leaderAddress = myaddress
+		leaderAddress = myAddress
 
 		nextIndex = make([]int,len(serverNodes))
 		matchIndex = make([]int, len(serverNodes))
@@ -533,8 +533,7 @@ func Heartbeat() {
 					}
 					if count >= (len(serverNodes)+1)/2+1{
 						commitIndex=n
-						fmt.Printf("\n[%s] Leader committed log up to index %d\n",
-									time.Now().Format("15:04:05.000000"), commitIndex)
+						fmt.Printf("\n[%s] Leader committed log up to index %d\n", time.Now().Format("15:04:05.000000"), commitIndex)
 						applyCommitted()
 						break
 					}
@@ -553,7 +552,7 @@ func Heartbeat() {
 }
 
 // This function is designed to emulate a client reaching out to the server. Note that many of the realistic details are removed, for simplicity
-func ClientAddToLog() {
+/*func ClientAddToLog() {
  // In a realistic scenario, the client will find the leader node and communicate with it
  // In this implementation, we are pretending that the client reached out to the server somehow
  // But any new log entries will not be created unless the server / node is a leader
@@ -570,8 +569,14 @@ func ClientAddToLog() {
 		if isLeader {
 			// lastAppliedIndex here is an int variable that is needed by a node to store the value of the last index it used in the log
 			mu.Lock()
-			entry := LogEntry{lastAppliedIndex, currentTerm}
-			log.Println("Client communication created the new log entry at index " + strconv.Itoa(entry.Index))
+			entry := LogEntry{
+				Index: len(raftLog),
+				Term: currentTerm,
+				Key: fmt.Sprintf("sim-key-%d", len(raftLog)),
+				Value: strconv.Itoa(len(raftLog)),
+				Operation: "W",
+			}
+			//log.Println("Client communication created the new log entry at index " + strconv.Itoa(entry.Index))
 			raftLog = append(raftLog, entry)
 			lastAppliedIndex++
 			//fmt.Printf("\n[Node %d] Log is now length %d\n", selfID, len(raftLog))
@@ -582,7 +587,7 @@ func ClientAddToLog() {
  // HINT 2: force the thread to sleep for a good amount of time (less than that of the leader election timer) and then repeat the actions above.
  // You may use an endless loop here or recursively call the function
  // HINT 3: you don’t need to add to the logic of creating new log entries, just handle the replication
-}
+}*/
 
 func main() {
 	// The assumption here is that the command line arguments will contain:
@@ -613,7 +618,7 @@ func main() {
 	for scanner.Scan() {
 		// Get server IP:port
 		text := scanner.Text()
-		log.Printf(text, index)
+		log.Printf("%s %d", text, index)
 		if index == myID {
 			myPort = text
 			myAddress = text
@@ -667,11 +672,11 @@ func main() {
 		}
 		serverID := index
 		if index >= myID{
-			serverID = index++
+			serverID = index+1
 		}
 		// Once connection is finally established
 		// Save that connection information in the servers list
-		serverNodes = append(serverNodes, ServerConnection{index, element, client})
+		serverNodes = append(serverNodes, ServerConnection{serverID, element, client})
 		// Record that in log
 		fmt.Println("Connected to " + element)
 	}
@@ -690,8 +695,9 @@ func main() {
 	role = "follower"
 	isAlive = true
 	commitIndex = -1
+	lastAppliedIndex = -1
 
-	go ClientAddToLog()
+	//go ClientAddToLog()
 
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
